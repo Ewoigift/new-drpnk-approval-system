@@ -1,3 +1,9 @@
+@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+.logo-no-space {
+    letter-spacing: -0.1em; /* Adjust this value as needed. Start with -0.1em, then try -0.15em or -0.2em */
+}
