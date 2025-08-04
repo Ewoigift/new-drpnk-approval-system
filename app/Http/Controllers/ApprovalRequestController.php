@@ -6,6 +6,7 @@ use App\Models\ApprovalRequest;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log; // Added for logging
 
 class ApprovalRequestController extends Controller
 {
@@ -17,11 +18,12 @@ class ApprovalRequestController extends Controller
         $user = Auth::user();
         $requests = collect();
 
+        // Apply filter if specified (e.g., from Dashboard 'My Submitted Requests')
         $filterByUser = $httpRequest->query('filter_by_user');
 
         if ($user->hasRole('admin')) {
             $requests = ApprovalRequest::with('user')->latest();
-            if ($filterByUser) {
+            if ($filterByUser) { // Admin can view specific user's requests
                 $requests->where('user_id', $filterByUser);
             }
             $requests = $requests->get();
@@ -38,7 +40,7 @@ class ApprovalRequestController extends Controller
             $roleColumnMap = [
                 'procurement' => 'procurement_approved_at',
                 'accountant' => 'accountant_approved_at',
-                'program_coordinator' => 'coordinator_approved_at',
+                'program_coordinator' => 'coordinator_approved_at', // This maps 'program_coordinator' role to 'coordinator_approved_at' column
                 'chief_officer' => 'chief_officer_approved_at',
             ];
 
@@ -47,34 +49,16 @@ class ApprovalRequestController extends Controller
             $approvedAtColumn = $roleColumnMap[$currentRole] ?? null;
 
             if ($pendingStatus && $approvedAtColumn) {
-                $requests = ApprovalRequest::where(function ($query) use ($pendingStatus, $approvedAtColumn, $user, $currentRole) {
-                    $query->where('status', $pendingStatus) // Requests currently pending this role's approval
-                          ->orWhere($approvedAtColumn, '!=', null) // Requests this role has approved
-                          ->orWhere('final_outcome', '!=', null); // Requests that have reached a final outcome (approved, rejected, sent back)
-
-                    // Additionally, for coordinator and above, show requests that are 'approved' (final stage)
-                    // and requests pending a later stage (e.g., coordinator sees pending chief officer)
-                    if ($currentRole === 'program_coordinator') {
-                        $query->orWhere('status', 'pending_chief_officer')
-                              ->orWhere('status', 'approved')
-                              ->orWhere('status', 'rejected'); // Ensure they also see rejected requests from later stages
-                    } elseif ($currentRole === 'accountant') {
-                        $query->orWhere('status', 'pending_coordinator')
-                              ->orWhere('status', 'pending_chief_officer')
-                              ->orWhere('status', 'approved')
-                              ->orWhere('status', 'rejected');
-                    } elseif ($currentRole === 'procurement') {
-                        $query->orWhere('status', 'pending_accountant')
-                              ->orWhere('status', 'pending_coordinator')
-                              ->orWhere('status', 'pending_chief_officer')
-                              ->orWhere('status', 'approved')
-                              ->orWhere('status', 'rejected');
-                    }
-                    // For any role, they should also see their own submitted requests
-                    $query->orWhere('user_id', $user->id);
-
+                $requests = ApprovalRequest::where(function ($query) use ($pendingStatus, $approvedAtColumn, $user) {
+                    $query->where('status', $pendingStatus)
+                        ->orWhere(function ($q) use ($approvedAtColumn) {
+                            $q->where('final_outcome', '!=', null)
+                                ->orWhere($approvedAtColumn, '!=', null);
+                        })
+                        ->orWhere('user_id', $user->id); // Approvers can see their own requests too
                 })->with('user')->latest()->get();
             } else {
+                // Fallback for roles that don't fit the approval flow or if no specific status is mapped
                 $requests = ApprovalRequest::where('user_id', $user->id)->with('user')->latest()->get();
             }
         }
@@ -87,6 +71,10 @@ class ApprovalRequestController extends Controller
      */
     public function create()
     {
+        // Only requesters can create requests
+        if (!Auth::user()->hasRole('requester')) {
+            return redirect()->route('dashboard')->withErrors('You are not authorized to create requests.');
+        }
         return view('requests.create');
     }
 
@@ -95,6 +83,11 @@ class ApprovalRequestController extends Controller
      */
     public function store(Request $httpRequest)
     {
+        // Only requesters can store requests
+        if (!Auth::user()->hasRole('requester')) {
+            return redirect()->route('dashboard')->withErrors('You are not authorized to submit requests.');
+        }
+
         $validatedData = $httpRequest->validate([
             'title' => 'required|string|max:255',
             'description' => 'required|string',
@@ -125,22 +118,36 @@ class ApprovalRequestController extends Controller
     public function show($id)
     {
         $approvalRequest = ApprovalRequest::find($id);
-
         if (!$approvalRequest) {
             return redirect()->route('dashboard')->withErrors('Request not found.');
         }
 
         $user = Auth::user();
 
-        // Simplified Authorization for viewing:
+        // Authorization logic for viewing a request
         // Admin can view any request.
-        // Requester can view their own requests.
-        // Any role in the approval flow can view any request (as they are part of the process).
-        if ($user->hasRole('admin') ||
-            $user->id === $approvalRequest->user_id ||
-            $user->hasAnyRole(['procurement', 'accountant', 'program_coordinator', 'chief_officer'])) {
-            // Authorized to view
-        } else {
+        // Requester can view their own request.
+        // Approvers can view requests if they are (or were) involved in its approval flow OR if the request is rejected/approved.
+        if (
+            !$user->hasRole('admin') && // Not an admin
+            $user->id !== $approvalRequest->user_id && // Not the requester
+            !(
+                // Approver's current or past involvement
+                ($user->hasRole('procurement') && ($approvalRequest->status == 'pending_procurement' || $approvalRequest->procurement_approved_at || $approvalRequest->current_approver_role == 'procurement')) ||
+                ($user->hasRole('accountant') && ($approvalRequest->status == 'pending_accountant' || $approvalRequest->accountant_approved_at || $approvalRequest->current_approver_role == 'accountant')) ||
+                ($user->hasRole('program_coordinator') && ($approvalRequest->status == 'pending_coordinator' || $approvalRequest->coordinator_approved_at || $approvalRequest->current_approver_role == 'program_coordinator')) ||
+                ($user->hasRole('chief_officer') && ($approvalRequest->status == 'pending_chief_officer' || $approvalRequest->chief_officer_approved_at || $approvalRequest->current_approver_role == 'chief_officer'))
+            ) &&
+            !(
+                // Allow viewing if request is rejected or approved, for relevant roles
+                ($approvalRequest->final_outcome == 'rejected' && ($user->id === $approvalRequest->user_id || $user->hasAnyRole(['procurement', 'accountant', 'program_coordinator', 'chief_officer']))) ||
+                ($approvalRequest->final_outcome == 'approved' && ($user->id === $approvalRequest->user_id || $user->hasAnyRole(['procurement', 'accountant', 'program_coordinator', 'chief_officer'])))
+            ) &&
+            !(
+                // Allow viewing if request is sent back to requester, for relevant roles
+                ($approvalRequest->final_outcome == 'sent_back' && ($user->id === $approvalRequest->user_id || $user->hasAnyRole(['procurement', 'accountant', 'program_coordinator', 'chief_officer'])))
+            )
+        ) {
             return redirect()->route('dashboard')->withErrors('You are not authorized to view this request.');
         }
 
@@ -160,10 +167,16 @@ class ApprovalRequestController extends Controller
 
         $user = Auth::user();
 
-        if (
-            ($user->id !== $approvalRequest->user_id && !$user->hasRole('admin')) ||
-            !($approvalRequest->status == 'pending_procurement' || $approvalRequest->status == 'sent_back_to_requester')
+        // Authorization logic for editing a request
+        if ($user->hasRole('admin')) {
+            // Admin can edit any request regardless of status
+        } elseif (
+            $user->id === $approvalRequest->user_id && // Must be the requester
+            ($approvalRequest->status === 'pending_procurement' || $approvalRequest->status === 'sent_back_to_requester') // Requester can only edit if status allows
         ) {
+            // Requester can edit their own request if it's pending procurement or sent back
+        } else {
+            // If neither admin nor authorized requester
             return redirect()->route('dashboard')->withErrors('You are not authorized to edit this request or it is no longer editable.');
         }
 
@@ -182,10 +195,16 @@ class ApprovalRequestController extends Controller
 
         $user = Auth::user();
 
-        if (
-            ($user->id !== $approvalRequest->user_id && !$user->hasRole('admin')) ||
-            !($approvalRequest->status == 'pending_procurement' || $approvalRequest->status == 'sent_back_to_requester')
+        // Authorization logic for updating a request (should mirror edit authorization)
+        if ($user->hasRole('admin')) {
+            // Admin can update any request regardless of status
+        } elseif (
+            $user->id === $approvalRequest->user_id && // Must be the requester
+            ($approvalRequest->status === 'pending_procurement' || $approvalRequest->status === 'sent_back_to_requester') // Requester can only update if status allows
         ) {
+            // Requester can update their own request if it's pending procurement or sent back
+        } else {
+            // If neither admin nor authorized requester
             return redirect()->route('dashboard')->withErrors('You are not authorized to update this request or it is no longer editable.');
         }
 
@@ -209,9 +228,9 @@ class ApprovalRequestController extends Controller
             'description' => $validatedData['description'],
             'estimated_cost' => $validatedData['estimated_cost'],
             'attachment_path' => $attachmentPath,
-            'status' => 'pending_procurement',
+            'status' => 'pending_procurement', // When updated, it goes back to initial approval stage
             'current_approver_role' => 'procurement',
-            'procurement_approved_at' => null,
+            'procurement_approved_at' => null, // Reset all approval timestamps and comments
             'accountant_approved_at' => null,
             'coordinator_approved_at' => null,
             'chief_officer_approved_at' => null,
@@ -237,10 +256,16 @@ class ApprovalRequestController extends Controller
 
         $user = Auth::user();
 
-        if (
-            ($user->id !== $approvalRequest->user_id && !$user->hasRole('admin')) ||
-            !($approvalRequest->status == 'pending_procurement' || $approvalRequest->status == 'sent_back_to_requester' || $user->hasRole('admin'))
+        // Authorization for deleting a request
+        if ($user->hasRole('admin')) {
+            // Admin can delete any request
+        } elseif (
+            $user->id === $approvalRequest->user_id && // Must be the requester
+            ($approvalRequest->status === 'pending_procurement' || $approvalRequest->status === 'sent_back_to_requester') // Requester can delete their own if status allows
         ) {
+            // Requester can delete their own request if it's pending procurement or sent back
+        } else {
+            // If neither admin nor authorized requester
             return redirect()->route('dashboard')->withErrors('You are not authorized to delete this request.');
         }
 
@@ -259,51 +284,87 @@ class ApprovalRequestController extends Controller
      */
     public function approve(Request $httpRequest, $id)
     {
+        $user = Auth::user();
+        $currentRole = $user->getRoleNames()->first(); // Get the primary role of the current user
+
+        $comments = $httpRequest->input('comments');
+        $action = $httpRequest->input('action');
+
+
         $approvalRequest = ApprovalRequest::find($id);
         if (!$approvalRequest) {
             return back()->withErrors('Request not found.');
         }
 
-        $user = Auth::user();
-        $comments = $httpRequest->input('comments');
-        $action = $httpRequest->input('action');
 
-        $currentRole = $user->getRoleNames()->first();
-        $nextStatus = null;
-        $nextApproverRole = null;
-        $currentApprovedAtField = $currentRole . '_approved_at';
-        $currentCommentsField = $currentRole . '_comments';
+        // Reject action
+        if (str_contains($action, 'reject_')) {
+            // Determine the role whose timestamp/comments should be set for rejection
+            $roleBeingRejected = str_replace('reject_', '', $action);
+            $rejectCommentsField = $roleBeingRejected . '_comments';
 
-        // Override for program_coordinator as its database column is 'coordinator_approved_at'
-        if ($currentRole === 'program_coordinator') {
-            $currentApprovedAtField = 'coordinator_approved_at';
-            $currentCommentsField = 'coordinator_comments';
-        }
+            // Ensure only the current approver or admin can reject
+            if (!$user->hasRole('admin') && $approvalRequest->current_approver_role !== $currentRole) {
+                return back()->withErrors('You are not authorized to reject this request at this stage.');
+            }
 
-
-        if ($action === 'reject') {
             $approvalRequest->update([
                 'status' => 'rejected',
                 'final_outcome' => 'rejected',
-                $currentCommentsField => $comments,
-                $currentApprovedAtField => now(),
+                $rejectCommentsField => $comments,
                 'current_approver_role' => null,
             ]);
             return back()->with('success', 'Request rejected.');
         }
 
-        if ($action === 'send_back_to_requester') {
+        // Send Back to Requester action
+        if (str_contains($action, 'send_back')) {
+             // Determine the role whose timestamp/comments should be set for sending back
+            $roleSendingBack = str_replace('send_back_', '', $action);
+            $sendBackCommentsField = $roleSendingBack . '_comments';
+
+            // Ensure only the current approver or admin can send back
+            if (!$user->hasRole('admin') && $approvalRequest->current_approver_role !== $currentRole) {
+                return back()->withErrors('You are not authorized to send back this request at this stage.');
+            }
+
             $approvalRequest->update([
                 'status' => 'sent_back_to_requester',
                 'final_outcome' => 'sent_back',
-                $currentCommentsField => $comments,
-                $currentApprovedAtField => now(),
+                $sendBackCommentsField => $comments, // Use the dynamically determined comments field
                 'current_approver_role' => null,
             ]);
             return back()->with('success', 'Request sent back to requester for modifications.');
         }
 
 
+        // Define the columns for approved_at and comments based on the current role.
+        // This is crucial for *non-admin* approvals to correctly set the timestamp.
+        $currentApprovedAtField = '';
+        $currentCommentsField = '';
+
+        // Correctly map the role to its respective database column names
+        // Note: For 'program_coordinator' role, the column is 'coordinator_approved_at'.
+        // This is a manual mapping because the role name doesn't directly match the column prefix.
+        if ($currentRole === 'procurement') {
+            $currentApprovedAtField = 'procurement_approved_at';
+            $currentCommentsField = 'procurement_comments';
+        } elseif ($currentRole === 'accountant') {
+            $currentApprovedAtField = 'accountant_approved_at';
+            $currentCommentsField = 'accountant_comments';
+        } elseif ($currentRole === 'program_coordinator') {
+            $currentApprovedAtField = 'coordinator_approved_at'; // Specific column for program_coordinator
+            $currentCommentsField = 'coordinator_comments'; // Specific column for program_coordinator
+        } elseif ($currentRole === 'chief_officer') {
+            $currentApprovedAtField = 'chief_officer_approved_at';
+            $currentCommentsField = 'chief_officer_comments';
+        } else {
+            // Fallback or error for unhandled roles trying to approve
+            return back()->withErrors('Your role is not configured for this approval action.');
+        }
+
+
+        // Approval flow definition
         $flow = [
             'procurement' => [
                 'current_status' => 'pending_procurement',
@@ -328,11 +389,50 @@ class ApprovalRequestController extends Controller
         ];
 
         $isAuthorized = false;
+        $nextStatus = null;
+        $nextApproverRole = null;
+
+        // Check for regular role-based authorization
         if (isset($flow[$currentRole]) && $approvalRequest->status === $flow[$currentRole]['current_status']) {
             $isAuthorized = true;
             $nextStatus = $flow[$currentRole]['next_status'];
             $nextApproverRole = $flow[$currentRole]['next_approver_role'];
         }
+        // Admin approval override
+        elseif ($user->hasRole('admin') && str_starts_with($approvalRequest->status, 'pending_')) {
+            $isAuthorized = true;
+            $currentPendingRole = str_replace('pending_', '', $approvalRequest->status);
+
+            // Re-map fields based on the *actual* pending role for Admin override
+            if ($currentPendingRole === 'procurement') {
+                $currentApprovedAtField = 'procurement_approved_at';
+                $currentCommentsField = 'procurement_comments';
+            } elseif ($currentPendingRole === 'accountant') {
+                $currentApprovedAtField = 'accountant_approved_at';
+                $currentCommentsField = 'accountant_comments';
+            } elseif ($currentPendingRole === 'coordinator') { // Note: 'coordinator' for DB column, not 'program_coordinator' role
+                $currentApprovedAtField = 'coordinator_approved_at';
+                $currentCommentsField = 'coordinator_comments';
+            } elseif ($currentPendingRole === 'chief_officer') {
+                $currentApprovedAtField = 'chief_officer_approved_at';
+                $currentCommentsField = 'chief_officer_comments';
+            }
+
+            if ($approvalRequest->status === 'pending_procurement') {
+                $nextStatus = 'pending_accountant';
+                $nextApproverRole = 'accountant';
+            } elseif ($approvalRequest->status === 'pending_accountant') {
+                $nextStatus = 'pending_coordinator';
+                $nextApproverRole = 'program_coordinator';
+            } elseif ($approvalRequest->status === 'pending_coordinator') {
+                $nextStatus = 'pending_chief_officer';
+                $nextApproverRole = 'chief_officer';
+            } elseif ($approvalRequest->status === 'pending_chief_officer') {
+                $nextStatus = 'approved';
+                $nextApproverRole = null;
+            }
+        }
+
 
         if ($isAuthorized) {
             $updateData = [
@@ -347,8 +447,6 @@ class ApprovalRequestController extends Controller
             }
 
             $approvalRequest->update($updateData);
-
-
             return back()->with('success', 'Request approved and moved to the next stage.');
         }
 
@@ -370,13 +468,22 @@ class ApprovalRequestController extends Controller
         }
 
         $user = Auth::user();
+        // Authorization to download: Requester, Admin, or any approver who has or had the request
         if (
-            $user->id !== $approvalRequest->user_id &&
-            !$user->hasRole('admin') &&
-            !($user->hasRole('procurement') && ($approvalRequest->procurement_approved_at || $approvalRequest->status == 'pending_procurement' || $approvalRequest->current_approver_role == 'procurement')) &&
-            !($user->hasRole('accountant') && ($approvalRequest->accountant_approved_at || $approvalRequest->status == 'pending_accountant' || $approvalRequest->current_approver_role == 'accountant')) &&
-            !($user->hasRole('program_coordinator') && ($approvalRequest->coordinator_approved_at || $approvalRequest->status == 'pending_coordinator' || $approvalRequest->current_approver_role == 'program_coordinator')) &&
-            !($user->hasRole('chief_officer') && ($approvalRequest->chief_officer_approved_at || $approvalRequest->status == 'pending_chief_officer' || $approvalRequest->current_approver_role == 'chief_officer'))
+            $user->id !== $approvalRequest->user_id && // Not the requester
+            !$user->hasRole('admin') && // Not an admin
+            !( // Check if user has relevant role AND the request was handled by or is pending with them
+                ($user->hasRole('procurement') && ($approvalRequest->procurement_approved_at || $approvalRequest->status == 'pending_procurement' || $approvalRequest->current_approver_role == 'procurement')) ||
+                ($user->hasRole('accountant') && ($approvalRequest->accountant_approved_at || $approvalRequest->status == 'pending_accountant' || $approvalRequest->current_approver_role == 'accountant')) ||
+                ($user->hasRole('program_coordinator') && ($approvalRequest->coordinator_approved_at || $approvalRequest->status == 'pending_coordinator' || $approvalRequest->current_approver_role == 'program_coordinator')) ||
+                ($user->hasRole('chief_officer') && ($approvalRequest->chief_officer_approved_at || $approvalRequest->status == 'pending_chief_officer' || $approvalRequest->current_approver_role == 'chief_officer'))
+            ) &&
+            // Added condition for viewing rejected/approved/sent_back requests
+            !(
+                ($approvalRequest->final_outcome == 'rejected' && ($user->id === $approvalRequest->user_id || $user->hasAnyRole(['procurement', 'accountant', 'program_coordinator', 'chief_officer']))) ||
+                ($approvalRequest->final_outcome == 'approved' && ($user->id === $approvalRequest->user_id || $user->hasAnyRole(['procurement', 'accountant', 'program_coordinator', 'chief_officer']))) ||
+                ($approvalRequest->final_outcome == 'sent_back' && ($user->id === $approvalRequest->user_id || $user->hasAnyRole(['procurement', 'accountant', 'program_coordinator', 'chief_officer'])))
+            )
         ) {
             return redirect()->route('requests.show', $approvalRequest)->withErrors('You are not authorized to download this attachment.');
         }

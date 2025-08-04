@@ -12,8 +12,10 @@
                     <div class="flex justify-between items-center mb-4">
                         <h3 class="text-lg font-medium text-gray-900">Requests Overview</h3>
                         @if (Auth::user()->hasRole('requester'))
-                            <a href="{{ route('requests.create') }}" class="inline-flex items-center px-4 py-2 bg-gray-800 border border-transparent rounded-md font-semibold text-xs text-white uppercase tracking-widest hover:bg-gray-700 focus:bg-gray-700 active:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition ease-in-out duration-150">
-                                Create New Request
+                            <a href="{{ route('requests.create') }}">
+                                <x-primary-button>
+                                    {{ __('Create New Request') }}
+                                </x-primary-button>
                             </a>
                         @endif
                     </div>
@@ -44,7 +46,7 @@
                                             Submitted On
                                         </th>
                                         <th scope="col" class="relative px-6 py-3">
-                                            <span class="sr-only">View</span>
+                                            <span class="sr-only">Actions</span>
                                         </th>
                                     </tr>
                                 </thead>
@@ -77,7 +79,10 @@
                                                 {{ $request->created_at->format('M d, Y') }}
                                             </td>
                                             <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                                                <a href="{{ route('requests.show', $request) }}" class="text-indigo-600 hover:text-indigo-900">View</a>
+                                                <div class="flex items-center space-x-2">
+                                                    <a href="{{ route('requests.show', $request) }}" class="text-indigo-600 hover:text-indigo-900">View</a>
+                                                    {{-- Edit and Delete buttons are now moved to the show.blade.php for detailed actions --}}
+                                                </div>
                                             </td>
                                         </tr>
                                     @endforeach
