@@ -1,8 +1,22 @@
 <x-app-layout>
     <x-slot name="header">
         <h2 class="font-semibold text-xl text-gray-800 leading-tight">
-            {{ __('All Requests') }}
-        </h2>
+    Hello, {{ Auth::user()->name }}!
+
+    @php
+        $userRole = Auth::user()->getRoleNames()->first();
+    @endphp
+
+    @if ($userRole === 'requester')
+        {{ __('Welcome to your dashboard. Here are your submitted requests.') }}
+    @elseif ($userRole === 'admin')
+        {{ __('Admin Dashboard. Comprehensive overview of all requests.') }}
+    @elseif (in_array($userRole, ['procurement', 'accountant', 'program_coordinator', 'chief_officer']))
+        {{ __('Requests awaiting your action.') }}
+    @else
+        {{ __('Your Dashboard') }}
+    @endif
+</h2>
     </x-slot>
 
     <div class="py-12">
@@ -10,7 +24,20 @@
             <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
                 <div class="p-6 text-gray-900">
                     <div class="flex justify-between items-center mb-4">
-                        <h3 class="text-lg font-medium text-gray-900">Requests Overview</h3>
+                        <h3 class="text-lg font-medium text-gray-900">
+    @php
+        $userRole = Auth::user()->getRoleNames()->first();
+        $overviewTitle = 'Requests Overview'; // Default title
+        if ($userRole === 'requester') {
+            $overviewTitle = 'My Submitted Requests';
+        } elseif (in_array($userRole, ['procurement', 'accountant', 'program_coordinator', 'chief_officer'])) {
+            $overviewTitle = 'Requests Awaiting My Approval'; // Or 'Pending Your Action'
+        } elseif ($userRole === 'admin') {
+            $overviewTitle = 'All Requests in the System';
+        }
+    @endphp
+    {{ $overviewTitle }}
+</h3>
                         @if (Auth::user()->hasRole('requester'))
                             <a href="{{ route('requests.create') }}">
                                 <x-primary-button>
