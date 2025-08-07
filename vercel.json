@@ -1,0 +1,33 @@
+{
+    "version": 2,
+    "public": true,
+    "builds": [{
+        "src": "public/index.php",
+        "use": "@vercel/php"
+    }],
+    "routes": [{
+            "src": "/_vercel/speed-insights/script.js",
+            "continue": true
+        },
+        {
+            "src": "/_vercel/insights/script.js",
+            "continue": true
+        },
+        {
+            "src": "/(.*)",
+            "dest": "public/index.php"
+        }
+    ],
+    "env": {
+        "APP_ENV": "production",
+        "APP_DEBUG": "false",
+        "APP_URL": "https://your-app-name.vercel.app", // Change this to your Vercel URL
+        "APP_KEY": "@vercel-app-key", // Vercel Secret for APP_KEY
+        "DB_CONNECTION": "mysql",
+        "DB_HOST": "@vercel-db-host", // Vercel Secret for DB_HOST
+        "DB_PORT": "@vercel-db-port", // Vercel Secret for DB_PORT
+        "DB_DATABASE": "@vercel-db-database", // Vercel Secret for DB_DATABASE
+        "DB_USERNAME": "@vercel-db-username", // Vercel Secret for DB_USERNAME
+        "DB_PASSWORD": "@vercel-db-password" // Vercel Secret for DB_PASSWORD
+    }
+}
